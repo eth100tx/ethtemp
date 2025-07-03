@@ -1,0 +1,12 @@
+# Get basic domain info
+Get-WmiObject Win32_ComputerSystem | Select Domain, PartOfDomain
+[System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
+
+# Find domain controllers
+nltest /dclist:$env:USERDOMAIN
+
+# Get your current user's DN
+([adsisearcher]"(&(objectClass=user)(sAMAccountName=$env:USERNAME))").FindOne().Properties.distinguishedname
+
+# Find specific user's DN (replace 'targetuser')
+([adsisearcher]"(&(objectClass=user)(sAMAccountName=targetuser))").FindOne().Properties.distinguishedname
