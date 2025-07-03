@@ -1,0 +1,5 @@
+New-ADUser -Name "ethantestuser" -SamAccountName "ethantestuser" -UserPrincipalName "ethantestuser@$((Get-ADDomain).DNSRoot)" -DisplayName "Ethan Test User" -GivenName "Ethan" -Surname "TestUser" -AccountPassword (ConvertTo-SecureString "TempPassword123!" -AsPlainText -Force) -Enabled $true -ChangePasswordAtLogon $false -PasswordNeverExpires $true -Description "Test user for lock/unlock experiments"
+
+Get-ADUser ethantestuser -Properties *
+
+Remove-ADUser ethantestuser -Confirm:$false
