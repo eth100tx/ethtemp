@@ -1,0 +1,308 @@
+# PowerShell script to create ethantestuser and test lock/unlock functionality
+# Requires Active Directory PowerShell module and appropriate permissions
+
+param(
+    [switch]$Cleanup,
+    [string]$UserName = "ethantestuser"
+)
+
+# Import AD module
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+    Write-Host "✓ Active Directory module loaded" -ForegroundColor Green
+} catch {
+    Write-Host "✗ Failed to load Active Directory module: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Please install RSAT tools or run on a domain controller" -ForegroundColor Yellow
+    exit 1
+}
+
+function Show-UserInfo {
+    param([string]$Username)
+    
+    Write-Host "`n=== User Information for: $Username ===" -ForegroundColor Cyan
+    
+    try {
+        $user = Get-ADUser -Identity $Username -Properties * -ErrorAction Stop
+        
+        Write-Host "Basic Info:" -ForegroundColor Yellow
+        Write-Host "  Name: $($user.Name)"
+        Write-Host "  SAM Account: $($user.SamAccountName)"
+        Write-Host "  Distinguished Name: $($user.DistinguishedName)"
+        Write-Host "  Enabled: $($user.Enabled)"
+        Write-Host "  Created: $($user.Created)"
+        
+        Write-Host "`nAccount Status:" -ForegroundColor Yellow
+        Write-Host "  Account Locked: $($user.LockedOut)"
+        Write-Host "  Lockout Time: $($user.AccountLockoutTime)"
+        Write-Host "  Bad Password Count: $($user.BadLogonCount)"
+        Write-Host "  Last Bad Password: $($user.LastBadPasswordAttempt)"
+        Write-Host "  Password Last Set: $($user.PasswordLastSet)"
+        Write-Host "  Password Expired: $($user.PasswordExpired)"
+        
+        return $user
+    }
+    catch {
+        Write-Host "✗ Error getting user info: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+function Test-LockUser {
+    param([string]$Username)
+    
+    Write-Host "`n=== Testing User Lock ===" -ForegroundColor Cyan
+    
+    # Method 1: Try to trigger lockout with bad passwords
+    Write-Host "Attempting to lock user by simulating bad password attempts..." -ForegroundColor Yellow
+    
+    try {
+        # Get domain lockout policy
+        $defaultDomain = Get-ADDefaultDomainPasswordPolicy
+        $lockoutThreshold = $defaultDomain.LockoutThreshold
+        
+        Write-Host "Domain lockout threshold: $lockoutThreshold bad attempts" -ForegroundColor Gray
+        
+        if ($lockoutThreshold -eq 0) {
+            Write-Host "⚠️  Account lockout is disabled in domain policy" -ForegroundColor Yellow
+            Write-Host "Using alternative method: Disable account temporarily" -ForegroundColor Yellow
+            
+            # Disable the account instead
+            Disable-ADAccount -Identity $Username
+            Write-Host "✓ Account disabled (simulating lock)" -ForegroundColor Green
+            return $true
+        }
+        
+        # Simulate bad password attempts using DirectoryServices
+        $domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+        $domainName = $domain.Name
+        
+        Write-Host "Simulating $lockoutThreshold bad password attempts..." -ForegroundColor Gray
+        
+        for ($i = 1; $i -le $lockoutThreshold; $i++) {
+            try {
+                # Try to authenticate with wrong password
+                $wrongPassword = "WrongPassword$i"
+                $credential = New-Object System.Management.Automation.PSCredential("$domainName\$Username", (ConvertTo-SecureString $wrongPassword -AsPlainText -Force))
+                
+                # This should fail and increment bad password count
+                $context = New-Object System.DirectoryServices.AccountManagement.PrincipalContext([System.DirectoryServices.AccountManagement.ContextType]::Domain, $domainName)
+                $isValid = $context.ValidateCredentials($Username, $wrongPassword)
+                
+                Write-Host "  Attempt $i with password '$wrongPassword': Failed (as expected)" -ForegroundColor Gray
+                Start-Sleep -Milliseconds 500
+            }
+            catch {
+                Write-Host "  Attempt $i: Generated authentication failure" -ForegroundColor Gray
+            }
+        }
+        
+        # Check if user is now locked
+        Start-Sleep -Seconds 2
+        $user = Get-ADUser -Identity $Username -Properties LockedOut, BadLogonCount
+        
+        if ($user.LockedOut) {
+            Write-Host "✓ User successfully locked out!" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "⚠️  User not locked. Bad logon count: $($user.BadLogonCount)" -ForegroundColor Yellow
+            Write-Host "Note: Lockout might take a few minutes to propagate" -ForegroundColor Gray
+            return $false
+        }
+    }
+    catch {
+        Write-Host "✗ Error during lock test: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Unlock-TestUser {
+    param([string]$Username)
+    
+    Write-Host "`n=== Unlocking User ===" -ForegroundColor Cyan
+    
+    try {
+        # Check current status
+        $user = Get-ADUser -Identity $Username -Properties LockedOut, Enabled
+        
+        if ($user.LockedOut) {
+            Write-Host "User is currently locked. Unlocking..." -ForegroundColor Yellow
+            Unlock-ADAccount -Identity $Username
+            Write-Host "✓ Account unlocked" -ForegroundColor Green
+        }
+        
+        if (-not $user.Enabled) {
+            Write-Host "User is disabled. Enabling..." -ForegroundColor Yellow
+            Enable-ADAccount -Identity $Username
+            Write-Host "✓ Account enabled" -ForegroundColor Green
+        }
+        
+        if (-not $user.LockedOut -and $user.Enabled) {
+            Write-Host "✓ User is already unlocked and enabled" -ForegroundColor Green
+        }
+        
+        return $true
+    }
+    catch {
+        Write-Host "✗ Error unlocking user: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Remove-TestUser {
+    param([string]$Username)
+    
+    Write-Host "`n=== Cleanup: Removing Test User ===" -ForegroundColor Cyan
+    
+    try {
+        $user = Get-ADUser -Identity $Username -ErrorAction SilentlyContinue
+        if ($user) {
+            $confirm = Read-Host "Remove user '$Username'? (y/N)"
+            if ($confirm -eq 'y' -or $confirm -eq 'Y') {
+                Remove-ADUser -Identity $Username -Confirm:$false
+                Write-Host "✓ Test user removed" -ForegroundColor Green
+            } else {
+                Write-Host "User removal cancelled" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "User '$Username' not found" -ForegroundColor Gray
+        }
+    }
+    catch {
+        Write-Host "✗ Error removing user: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Main execution
+Write-Host "Active Directory Test User Manager" -ForegroundColor Green
+Write-Host "=================================" -ForegroundColor Green
+
+# Handle cleanup mode
+if ($Cleanup) {
+    Remove-TestUser -Username $UserName
+    exit 0
+}
+
+# Check if user already exists
+try {
+    $existingUser = Get-ADUser -Identity $UserName -ErrorAction SilentlyContinue
+    if ($existingUser) {
+        Write-Host "✓ User '$UserName' already exists" -ForegroundColor Yellow
+        $createNew = $false
+    } else {
+        $createNew = $true
+    }
+} catch {
+    $createNew = $true
+}
+
+# Create test user if needed
+if ($createNew) {
+    Write-Host "`n=== Creating Test User: $UserName ===" -ForegroundColor Cyan
+    
+    try {
+        # Get default Users container
+        $domain = Get-ADDomain
+        $usersContainer = "CN=Users,$($domain.DistinguishedName)"
+        
+        # Create user parameters
+        $userParams = @{
+            Name = $UserName
+            SamAccountName = $UserName
+            UserPrincipalName = "$UserName@$($domain.DNSRoot)"
+            DisplayName = "Ethan Test User"
+            GivenName = "Ethan"
+            Surname = "TestUser"
+            Description = "Test user for lock/unlock experiments"
+            Path = $usersContainer
+            AccountPassword = (ConvertTo-SecureString "TempPassword123!" -AsPlainText -Force)
+            Enabled = $true
+            ChangePasswordAtLogon = $false
+            PasswordNeverExpires = $true
+        }
+        
+        New-ADUser @userParams
+        Write-Host "✓ Test user created successfully" -ForegroundColor Green
+        Write-Host "  Username: $UserName" -ForegroundColor Gray
+        Write-Host "  Password: TempPassword123!" -ForegroundColor Gray
+        Write-Host "  Container: $usersContainer" -ForegroundColor Gray
+        
+    } catch {
+        Write-Host "✗ Failed to create user: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Show initial user info
+$user = Show-UserInfo -Username $UserName
+if (-not $user) { exit 1 }
+
+# Interactive menu
+do {
+    Write-Host "`n" + "="*50 -ForegroundColor White
+    Write-Host "Test User Management Menu" -ForegroundColor White
+    Write-Host "="*50 -ForegroundColor White
+    Write-Host "1. Show user information"
+    Write-Host "2. Test lock user account"
+    Write-Host "3. Unlock user account"
+    Write-Host "4. Reset user password"
+    Write-Host "5. Show domain lockout policy"
+    Write-Host "9. Remove test user (cleanup)"
+    Write-Host "0. Exit"
+    Write-Host "-"*50
+    
+    $choice = Read-Host "Select an option"
+    
+    switch ($choice) {
+        '1' {
+            Show-UserInfo -Username $UserName | Out-Null
+        }
+        '2' {
+            $locked = Test-LockUser -Username $UserName
+            Start-Sleep -Seconds 1
+            Show-UserInfo -Username $UserName | Out-Null
+        }
+        '3' {
+            $unlocked = Unlock-TestUser -Username $UserName
+            Start-Sleep -Seconds 1
+            Show-UserInfo -Username $UserName | Out-Null
+        }
+        '4' {
+            try {
+                $newPassword = Read-Host "Enter new password" -AsSecureString
+                Set-ADAccountPassword -Identity $UserName -NewPassword $newPassword -Reset
+                Write-Host "✓ Password reset successfully" -ForegroundColor Green
+            } catch {
+                Write-Host "✗ Failed to reset password: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+        '5' {
+            try {
+                Write-Host "`n=== Domain Lockout Policy ===" -ForegroundColor Cyan
+                $policy = Get-ADDefaultDomainPasswordPolicy
+                Write-Host "Lockout Threshold: $($policy.LockoutThreshold) bad attempts"
+                Write-Host "Lockout Duration: $($policy.LockoutDuration)"
+                Write-Host "Lockout Observation Window: $($policy.LockoutObservationWindow)"
+            } catch {
+                Write-Host "✗ Error getting lockout policy: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+        '9' {
+            Remove-TestUser -Username $UserName
+            $choice = '0'  # Exit after cleanup
+        }
+        '0' {
+            Write-Host "Exiting..." -ForegroundColor Green
+        }
+        default {
+            Write-Host "Invalid option. Please try again." -ForegroundColor Red
+        }
+    }
+    
+    if ($choice -ne '0') {
+        Write-Host "`nPress Enter to continue..." -ForegroundColor Gray
+        Read-Host
+    }
+    
+} while ($choice -ne '0')
+
+Write-Host "`nNote: To clean up later, run: .\script.ps1 -Cleanup" -ForegroundColor Gray
