@@ -1,0 +1,37 @@
+#=========================================
+# Query User
+#=========================================
+# Basic user info
+Get-ADUser -Identity "EthanTestAccount" -Properties *
+
+# Check specific lockout properties
+Get-ADUser -Identity "EthanTestAccount" -Properties LockedOut, Enabled, LastLogonDate, BadLogonCount
+
+# Search by display name
+Get-ADUser -Filter "DisplayName -eq 'Ethan Test Account'"
+
+#=========================================
+# lock
+#=========================================
+# Disable account
+Disable-ADAccount -Identity "EthanTestAccount"
+
+# Set account expiration (additional lock)
+Set-ADAccountExpiration -Identity "EthanTestAccount" -DateTime (Get-Date).AddDays(-1)
+
+
+#=========================================
+# unlock
+#=========================================
+
+# Enable account
+Enable-ADAccount -Identity "EthanTestAccount"
+
+# Unlock if locked out
+Unlock-ADAccount -Identity "EthanTestAccount"
+
+# Clear account expiration
+Clear-ADAccountExpiration -Identity "EthanTestAccount"
+
+# Reset bad password count
+Set-ADUser -Identity "EthanTestAccount" -Replace @{badPwdCount=0}
