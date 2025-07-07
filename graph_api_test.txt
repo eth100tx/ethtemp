@@ -1,0 +1,118 @@
+# Test 1: PowerShell - Check if Microsoft Graph module is available and can connect
+# Run this first to see if you have the Graph PowerShell module
+
+# Install Microsoft Graph module if not present
+if (!(Get-Module -ListAvailable -Name Microsoft.Graph)) {
+    Write-Host "Installing Microsoft Graph PowerShell module..." -ForegroundColor Yellow
+    Install-Module Microsoft.Graph -Scope CurrentUser -Force
+}
+
+# Test basic connection
+Write-Host "Testing Microsoft Graph connection..." -ForegroundColor Green
+try {
+    # Try to connect (this will prompt for authentication)
+    Connect-MgGraph -Scopes "User.Read.All"
+    
+    # Get your own user info to test connection
+    $currentUser = Get-MgUser -UserId (Get-MgContext).Account
+    Write-Host "✅ Successfully connected to Microsoft Graph!" -ForegroundColor Green
+    Write-Host "Current user: $($currentUser.DisplayName) ($($currentUser.UserPrincipalName))" -ForegroundColor Cyan
+    
+    # Check what permissions you have
+    $context = Get-MgContext
+    Write-Host "Current scopes: $($context.Scopes -join ', ')" -ForegroundColor Cyan
+    
+    # Try to list some users (to test permissions)
+    Write-Host "Testing user enumeration..." -ForegroundColor Yellow
+    $users = Get-MgUser -Top 5 | Select-Object DisplayName, UserPrincipalName, AccountEnabled
+    if ($users) {
+        Write-Host "✅ Can read user accounts:" -ForegroundColor Green
+        $users | Format-Table
+    }
+    
+    Disconnect-MgGraph
+    Write-Host "✅ Graph API test completed successfully!" -ForegroundColor Green
+    
+} catch {
+    Write-Host "❌ Error connecting to Microsoft Graph: $($_.Exception.Message)" -ForegroundColor Red
+}
+
+Write-Host "`n" + "="*50
+Write-Host "Test 2: Check current Azure AD status" -ForegroundColor Green
+Write-Host "="*50
+
+# Check Azure AD join status
+$dsregCmd = dsregcmd /status
+$azureAdJoined = ($dsregCmd | Select-String "AzureAdJoined").ToString().Split(":")[1].Trim()
+$domainJoined = ($dsregCmd | Select-String "DomainJoined").ToString().Split(":")[1].Trim()
+$enterpriseJoined = ($dsregCmd | Select-String "EnterpriseJoined").ToString().Split(":")[1].Trim()
+
+Write-Host "Azure AD Joined: $azureAdJoined" -ForegroundColor Cyan
+Write-Host "Domain Joined: $domainJoined" -ForegroundColor Cyan  
+Write-Host "Enterprise Joined: $enterpriseJoined" -ForegroundColor Cyan
+
+if ($azureAdJoined -eq "YES") {
+    Write-Host "✅ Device is Azure AD joined - Graph API should work" -ForegroundColor Green
+} else {
+    Write-Host "⚠️  Device is not Azure AD joined - may need app registration" -ForegroundColor Yellow
+}
+
+Write-Host "`n" + "="*50
+Write-Host "Test 3: Check if you have admin privileges" -ForegroundColor Green
+Write-Host "="*50
+
+# Check if running as admin
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+Write-Host "Running as Administrator: $isAdmin" -ForegroundColor Cyan
+
+# Check Azure AD roles (if connected)
+try {
+    Connect-MgGraph -Scopes "Directory.Read.All" -NoWelcome
+    $myRoles = Get-MgUserMemberOf -UserId (Get-MgContext).Account | Where-Object {$_.AdditionalProperties."@odata.type" -eq "#microsoft.graph.directoryRole"}
+    if ($myRoles) {
+        Write-Host "Your Azure AD roles:" -ForegroundColor Cyan
+        foreach ($role in $myRoles) {
+            $roleDetails = Get-MgDirectoryRole -DirectoryRoleId $role.Id
+            Write-Host "  - $($roleDetails.DisplayName)" -ForegroundColor White
+        }
+    } else {
+        Write-Host "No Azure AD admin roles found" -ForegroundColor Yellow
+    }
+    Disconnect-MgGraph
+} catch {
+    Write-Host "Could not check Azure AD roles: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+Write-Host "`n" + "="*50
+Write-Host "Test 4: Test account unlock simulation" -ForegroundColor Green
+Write-Host "="*50
+
+# Simulate what the unlock operation would do
+Write-Host "Enter a test user email to check (or press Enter to skip):"
+$testUser = Read-Host
+if ($testUser) {
+    try {
+        Connect-MgGraph -Scopes "User.ReadWrite.All" -NoWelcome
+        $user = Get-MgUser -UserId $testUser -ErrorAction Stop
+        Write-Host "✅ Found user: $($user.DisplayName)" -ForegroundColor Green
+        Write-Host "Account Enabled: $($user.AccountEnabled)" -ForegroundColor Cyan
+        Write-Host "UPN: $($user.UserPrincipalName)" -ForegroundColor Cyan
+        
+        Write-Host "`nTo unlock this account, the script would:" -ForegroundColor Yellow
+        Write-Host "  1. Set AccountEnabled = true" -ForegroundColor White
+        Write-Host "  2. Clear any sign-in risk (if applicable)" -ForegroundColor White
+        
+        Disconnect-MgGraph
+    } catch {
+        Write-Host "❌ Could not access user: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "This might indicate insufficient permissions" -ForegroundColor Yellow
+    }
+}
+
+Write-Host "`n" + "="*50
+Write-Host "SUMMARY" -ForegroundColor Green
+Write-Host "="*50
+Write-Host "Run this test to determine if you need to:"
+Write-Host "1. ✅ Use existing Azure AD authentication (device-based)"
+Write-Host "2. ⚠️  Create an app registration for service authentication"
+Write-Host "3. ❌ Use on-premises AD tools instead of Graph API"
