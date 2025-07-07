@@ -1,0 +1,345 @@
+# On-Premises Active Directory Account Manager
+# Manages EthanTestAccount in on-premises AD only
+
+param(
+    [string]$UserName = "EthanTestAccount"
+)
+
+Write-Host "On-Premises AD Account Manager for: $UserName" -ForegroundColor Green
+Write-Host "=" * 50
+
+function Test-ADConnection {
+    try {
+        # Try to import the Active Directory module
+        Import-Module ActiveDirectory -ErrorAction Stop
+        Write-Host "✅ Active Directory module loaded" -ForegroundColor Green
+        
+        # Test connection to domain
+        $domain = Get-ADDomain -ErrorAction Stop
+        Write-Host "✅ Connected to domain: $($domain.DNSRoot)" -ForegroundColor Green
+        
+        return $true
+    } catch {
+        Write-Host "❌ Cannot connect to Active Directory: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Make sure you're on a domain-joined machine and have AD permissions" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+function Find-ADUser {
+    param([string]$User)
+    
+    Write-Host "Searching for user: $User" -ForegroundColor Yellow
+    
+    try {
+        # Try to find user by SamAccountName first
+        $adUser = Get-ADUser -Identity $User -Properties * -ErrorAction SilentlyContinue
+        if ($adUser) {
+            Write-Host "✅ Found user by SamAccountName" -ForegroundColor Green
+            return $adUser
+        }
+        
+        # Try to find by DisplayName
+        $adUser = Get-ADUser -Filter "DisplayName -eq '$User'" -Properties * -ErrorAction SilentlyContinue
+        if ($adUser) {
+            Write-Host "✅ Found user by DisplayName" -ForegroundColor Green
+            return $adUser
+        }
+        
+        # Try to find by Name
+        $adUser = Get-ADUser -Filter "Name -eq '$User'" -Properties * -ErrorAction SilentlyContinue
+        if ($adUser) {
+            Write-Host "✅ Found user by Name" -ForegroundColor Green
+            return $adUser
+        }
+        
+        # Try wildcard search
+        $adUser = Get-ADUser -Filter "SamAccountName -like '*$User*'" -Properties * -ErrorAction SilentlyContinue
+        if ($adUser) {
+            if ($adUser.Count -gt 1) {
+                Write-Host "⚠️ Multiple users found, using first match" -ForegroundColor Yellow
+                return $adUser[0]
+            } else {
+                Write-Host "✅ Found user by partial match" -ForegroundColor Green
+                return $adUser
+            }
+        }
+        
+        Write-Host "❌ User not found in Active Directory" -ForegroundColor Red
+        return $null
+        
+    } catch {
+        Write-Host "❌ Error searching for user: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+function Show-ADUserStatus {
+    param([object]$User)
+    
+    if (-not $User) {
+        Write-Host "❌ No user to display" -ForegroundColor Red
+        return
+    }
+    
+    Write-Host "`n[ON-PREMISES AD STATUS]" -ForegroundColor Cyan
+    Write-Host "Display Name: $($User.DisplayName)"
+    Write-Host "Sam Account Name: $($User.SamAccountName)"
+    Write-Host "User Principal Name: $($User.UserPrincipalName)"
+    Write-Host "Enabled: $($User.Enabled)" -ForegroundColor $(if($User.Enabled) {"Green"} else {"Red"})
+    Write-Host "Locked Out: $($User.LockedOut)" -ForegroundColor $(if($User.LockedOut) {"Red"} else {"Green"})
+    Write-Host "Distinguished Name: $($User.DistinguishedName)"
+    
+    # Account details
+    Write-Host "`n[ACCOUNT DETAILS]" -ForegroundColor Cyan
+    Write-Host "Created: $($User.Created)"
+    Write-Host "Modified: $($User.Modified)"
+    Write-Host "Last Logon Date: $($User.LastLogonDate)"
+    Write-Host "Last Bad Password Attempt: $($User.LastBadPasswordAttempt)"
+    Write-Host "Bad Logon Count: $($User.BadLogonCount)"
+    Write-Host "Password Last Set: $($User.PasswordLastSet)"
+    Write-Host "Password Expired: $($User.PasswordExpired)" -ForegroundColor $(if($User.PasswordExpired) {"Red"} else {"Green"})
+    Write-Host "Password Never Expires: $($User.PasswordNeverExpires)"
+    
+    # Account lockout details
+    if ($User.LockedOut) {
+        Write-Host "`n[LOCKOUT DETAILS]" -ForegroundColor Red
+        Write-Host "Account Lockout Time: $($User.AccountLockoutTime)"
+        
+        # Get lockout duration from domain policy
+        try {
+            $domain = Get-ADDomain
+            $domainPolicy = Get-ADDefaultDomainPasswordPolicy -Identity $domain
+            Write-Host "Lockout Duration: $($domainPolicy.LockoutDuration) minutes"
+            Write-Host "Lockout Threshold: $($domainPolicy.LockoutThreshold) bad attempts"
+        } catch {
+            Write-Host "Could not retrieve domain lockout policy"
+        }
+    }
+    
+    # Group memberships
+    Write-Host "`n[GROUP MEMBERSHIPS]" -ForegroundColor Cyan
+    try {
+        $groups = Get-ADPrincipalGroupMembership -Identity $User.SamAccountName | Select-Object -First 10
+        if ($groups) {
+            foreach ($group in $groups) {
+                Write-Host "  - $($group.Name)"
+            }
+            if ($groups.Count -eq 10) {
+                Write-Host "  ... (showing first 10 groups)"
+            }
+        } else {
+            Write-Host "  No group memberships found"
+        }
+    } catch {
+        Write-Host "  Could not retrieve group memberships"
+    }
+}
+
+function Lock-ADAccount {
+    param([object]$User)
+    
+    if (-not $User) {
+        Write-Host "❌ No user to lock" -ForegroundColor Red
+        return $false
+    }
+    
+    Write-Host "`nLocking on-premises AD account..." -ForegroundColor Yellow
+    
+    try {
+        # Disable the account
+        Disable-ADAccount -Identity $User.SamAccountName -Confirm:$false
+        Write-Host "✅ Account disabled successfully" -ForegroundColor Green
+        
+        # Set account to expire immediately (additional lock method)
+        try {
+            $expireDate = (Get-Date).AddDays(-1)
+            Set-ADAccountExpiration -Identity $User.SamAccountName -DateTime $expireDate
+            Write-Host "✅ Account expiration set to force lockout" -ForegroundColor Green
+        } catch {
+            Write-Host "⚠️ Could not set account expiration: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        
+        return $true
+    } catch {
+        Write-Host "❌ Failed to lock AD account: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Unlock-ADAccount {
+    param([object]$User)
+    
+    if (-not $User) {
+        Write-Host "❌ No user to unlock" -ForegroundColor Red
+        return $false
+    }
+    
+    Write-Host "`nUnlocking on-premises AD account..." -ForegroundColor Yellow
+    
+    try {
+        # Enable the account
+        Enable-ADAccount -Identity $User.SamAccountName -Confirm:$false
+        Write-Host "✅ Account enabled successfully" -ForegroundColor Green
+        
+        # Unlock the account if it's locked
+        if ($User.LockedOut) {
+            Unlock-ADAccount -Identity $User.SamAccountName -Confirm:$false
+            Write-Host "✅ Account unlocked successfully" -ForegroundColor Green
+        }
+        
+        # Clear account expiration if set
+        try {
+            Clear-ADAccountExpiration -Identity $User.SamAccountName -Confirm:$false
+            Write-Host "✅ Account expiration cleared" -ForegroundColor Green
+        } catch {
+            Write-Host "⚠️ Could not clear account expiration: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        
+        # Reset bad logon count
+        try {
+            Set-ADUser -Identity $User.SamAccountName -Replace @{badPwdCount=0}
+            Write-Host "✅ Bad password count reset" -ForegroundColor Green
+        } catch {
+            Write-Host "⚠️ Could not reset bad password count: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        
+        return $true
+    } catch {
+        Write-Host "❌ Failed to unlock AD account: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Reset-ADPassword {
+    param([object]$User)
+    
+    if (-not $User) {
+        Write-Host "❌ No user to reset password for" -ForegroundColor Red
+        return $false
+    }
+    
+    Write-Host "`nResetting password for on-premises AD account..." -ForegroundColor Yellow
+    
+    # Generate a random password
+    $newPassword = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | ForEach-Object {[char]$_})
+    $newPassword += "!@#"  # Add special characters
+    
+    try {
+        $securePassword = ConvertTo-SecureString $newPassword -AsPlainText -Force
+        Set-ADAccountPassword -Identity $User.SamAccountName -NewPassword $securePassword -Reset -Confirm:$false
+        
+        # Force password change at next logon
+        Set-ADUser -Identity $User.SamAccountName -ChangePasswordAtLogon $true
+        
+        Write-Host "✅ Password reset successfully" -ForegroundColor Green
+        Write-Host "New temporary password: $newPassword" -ForegroundColor Yellow
+        Write-Host "⚠️ User must change password at next logon" -ForegroundColor Yellow
+        
+        return $true
+    } catch {
+        Write-Host "❌ Failed to reset password: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+# Main script execution
+try {
+    # Test Active Directory connection
+    if (-not (Test-ADConnection)) {
+        Write-Host "❌ Cannot connect to Active Directory" -ForegroundColor Red
+        exit 1
+    }
+    
+    # Find the user
+    $adUser = Find-ADUser -User $UserName
+    
+    if (-not $adUser) {
+        Write-Host "❌ User '$UserName' not found in Active Directory" -ForegroundColor Red
+        Write-Host "Make sure the username is correct and you have permissions to read users" -ForegroundColor Yellow
+        exit 1
+    }
+    
+    # Show current status
+    Show-ADUserStatus -User $adUser
+    
+    # Show menu
+    Write-Host "`n" + "=" * 50
+    Write-Host "What would you like to do?" -ForegroundColor Green
+    Write-Host "1. Refresh Status"
+    Write-Host "2. Lock Account (Disable + Expire)"
+    Write-Host "3. Unlock Account (Enable + Clear Lockout)"
+    Write-Host "4. Reset Password"
+    Write-Host "5. Exit"
+    
+    $choice = Read-Host "`nEnter your choice (1-5)"
+    
+    switch ($choice) {
+        "1" {
+            Write-Host "`nRefreshing..." -ForegroundColor Yellow
+            $adUser = Find-ADUser -User $UserName
+            if ($adUser) {
+                Show-ADUserStatus -User $adUser
+            }
+        }
+        "2" {
+            $confirm = Read-Host "`nAre you sure you want to LOCK the AD account? (y/N)"
+            if ($confirm -eq 'y' -or $confirm -eq 'Y') {
+                if (Lock-ADAccount -User $adUser) {
+                    Write-Host "`nRefreshing status..." -ForegroundColor Yellow
+                    Start-Sleep 2
+                    $adUser = Find-ADUser -User $UserName
+                    if ($adUser) {
+                        Show-ADUserStatus -User $adUser
+                    }
+                }
+            } else {
+                Write-Host "Lock cancelled" -ForegroundColor Yellow
+            }
+        }
+        "3" {
+            $confirm = Read-Host "`nAre you sure you want to UNLOCK the AD account? (y/N)"
+            if ($confirm -eq 'y' -or $confirm -eq 'Y') {
+                if (Unlock-ADAccount -User $adUser) {
+                    Write-Host "`nRefreshing status..." -ForegroundColor Yellow
+                    Start-Sleep 2
+                    $adUser = Find-ADUser -User $UserName
+                    if ($adUser) {
+                        Show-ADUserStatus -User $adUser
+                    }
+                }
+            } else {
+                Write-Host "Unlock cancelled" -ForegroundColor Yellow
+            }
+        }
+        "4" {
+            $confirm = Read-Host "`nAre you sure you want to RESET the password? (y/N)"
+            if ($confirm -eq 'y' -or $confirm -eq 'Y') {
+                if (Reset-ADPassword -User $adUser) {
+                    Write-Host "`nRefreshing status..." -ForegroundColor Yellow
+                    Start-Sleep 2
+                    $adUser = Find-ADUser -User $UserName
+                    if ($adUser) {
+                        Show-ADUserStatus -User $adUser
+                    }
+                }
+            } else {
+                Write-Host "Password reset cancelled" -ForegroundColor Yellow
+            }
+        }
+        "5" {
+            Write-Host "Goodbye!" -ForegroundColor Green
+            exit 0
+        }
+        default {
+            Write-Host "Invalid choice" -ForegroundColor Red
+        }
+    }
+    
+} catch {
+    Write-Host "`n❌ Script error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Stack trace: $($_.ScriptStackTrace)" -ForegroundColor Red
+}
+
+Write-Host "`nScript completed. Press any key to exit..."
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
